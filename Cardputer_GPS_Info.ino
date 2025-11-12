@@ -2,6 +2,14 @@
 #include <vector>
 #include <algorithm>
 #include <TinyGPSPlus.h>
+#include <SD.h>
+#include <FS.h>
+
+#define APP_VERSION "1.1.0"
+
+#define CONFIG_FILE "/cpGpsInfo.conf"
+bool sdAvailable = false;
+bool sdErr = false;
 
 HardwareSerial GPS_Serial(1); // Use UART1 for GPS.
 TinyGPSPlus gps;
@@ -37,9 +45,16 @@ bool helpMenu = false;
 bool infoMenu = false;
 bool configsMenu = false;
 int configsMenuSel = 0;
-String tempPins[2] = {"", ""};  // 0 Tx, 1 Rx.
-int gpsTxPin = 15; // GPS TX pin (Cardputer GPIO2)
-int gpsRxPin = 13; // GPS RX pin (Cardputer GPIO1)
+String configsTmp[3] = {"", "", ""};  // 0 Rx, 1 Tx, 2 Baud.
+
+int gpsRxPin = 1; // Cardputer Rx pin <- GPS Tx pin.
+int gpsTxPin = 2; // Cardputer Tx pin <- GPS Rx pin.
+int gpsBaud = 9600;
+
+enum GPSState { GPS_OFF, GPS_ON, GPS_ERR };
+GPSState gpsSerialState = GPS_OFF;
+const unsigned long GPS_TIMEOUT = 1000;
+unsigned long lastValidGpsMillis = 0;
 
 // Cardputer (1, 1.1, ADV) Display.
 const int screenW = 240;
@@ -49,7 +64,7 @@ const int screenH = 135;
 */
 void initGPSSerial(bool should_I) {
   if (should_I == true)
-    GPS_Serial.begin(115200, SERIAL_8N1, gpsTxPin, gpsRxPin); // Start GPS UART.
+    GPS_Serial.begin(gpsBaud, SERIAL_8N1, gpsRxPin, gpsTxPin); // Start GPS UART.
   else
     GPS_Serial.end();
 }
@@ -58,15 +73,28 @@ void initGPSSerial(bool should_I) {
 */
 void serialGPSRead() {
   static String nmeaLine = "";
+  bool gotValidChar = false;
+  GPSState prevState = gpsSerialState;
+  if (GPS_Serial.available() == 0 && millis() - lastValidGpsMillis > GPS_TIMEOUT)
+    gpsSerialState = GPS_ERR;
   while (GPS_Serial.available()) {
     char c = GPS_Serial.read();
     gps.encode(c);
+    if (c != '\r' && c != '\n') gotValidChar = true;
     if (c == '\n') {
       nmeaDispatcher(nmeaLine);
       nmeaLine = "";
     } else if (c != '\r')
       nmeaLine += c;
   }
+  if (gotValidChar) {
+    lastValidGpsMillis = millis();
+    gpsSerialState = GPS_ON;
+  } else if (millis() - lastValidGpsMillis > GPS_TIMEOUT) {
+    gpsSerialState = GPS_ERR;
+  }
+  if (gpsSerialState != prevState)
+    drawStatus();
 }
 
 /*    Read the NMEA sentence and dispatch to parsers.
@@ -308,24 +336,30 @@ void drawSkyPlot() {
     else if
       (sat.visible) color = TFT_YELLOW;
     M5Cardputer.Display.fillCircle(sx, sy, 2, color); // Satellite dot.
-    if (!hidePlotId)
+    if (!hidePlotId) // Satellite id.
     {
-      M5Cardputer.Display.setTextColor(color);  // Satellite label.
       M5Cardputer.Display.setTextSize(0);
+      M5Cardputer.Display.setTextColor(TFT_BLACK);
+      M5Cardputer.Display.setCursor(sx + 4, sy - 4);
+      M5Cardputer.Display.printf("%d", sat.id);
+      M5Cardputer.Display.setTextColor(color);
       M5Cardputer.Display.setCursor(sx + 5, sy - 3);
       M5Cardputer.Display.printf("%d", sat.id);
     }
-    if (!hidePlotSystem)
+    if (!hidePlotSystem) // Satellite system.
     {
-      M5Cardputer.Display.setTextColor(color);  // Satellite label.
-      M5Cardputer.Display.setTextSize(0);
-      M5Cardputer.Display.setCursor(sx + 5, sy - 3);
       const char* sys;
       if (sat.system == "GPS") sys = "Gp";
       else if (sat.system == "GLONASS") sys = "Gl";
       else if (sat.system == "Galileo") sys = "Ga";
       else if (sat.system == "BeiDou") sys = "Bd";
       else sys = "?";
+      M5Cardputer.Display.setTextSize(0);
+      M5Cardputer.Display.setTextColor(TFT_BLACK);
+      M5Cardputer.Display.setCursor(sx + 4, sy - 4);
+      M5Cardputer.Display.printf("%s", sys);
+      M5Cardputer.Display.setTextColor(color);
+      M5Cardputer.Display.setCursor(sx + 5, sy - 3);
       M5Cardputer.Display.printf("%s", sys);
     }
   }
@@ -421,7 +455,6 @@ void drawHeader(){
   M5Cardputer.Display.setTextColor(TFT_GREEN);
   M5Cardputer.Display.setCursor(x + 4, y+h + 3);
   M5Cardputer.Display.printf("%-1s", "[s]Start/Stop. [c]Config. [h]Help.");
-  Serial.printf("drawHeader");
 }
 
 /*    Draw app features status.
@@ -433,15 +466,18 @@ void drawStatus(){
   int h = 13;
   char statusChar[64];
   statusChar[0] = '\0';
-  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"GPS:%s |", gpsSerial ? "Start" : "Stop");
-  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar)," Cnsol:%s |", debugSerial ? "Start" : "Stop");
-  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar)," Tx:%d | Rx:%d", gpsTxPin, gpsRxPin);
+  const char* gpsStr = "Off";
+  if (gpsSerialState == GPS_ON) gpsStr = "On";
+  else if (gpsSerialState == GPS_ERR) gpsStr = "Err";
+  snprintf(statusChar + strlen(statusChar), sizeof(statusChar) - strlen(statusChar),"GP:%s ", gpsStr);
+  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"Rx:%d Tx:%d ", gpsRxPin, gpsTxPin);
+  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"Bd:%d ", gpsBaud);
+  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"| Cnsl:%s", debugSerial ? "On" : "Off");
   M5Cardputer.Display.fillRect(x, y, w, h, TFT_DARKGREY);
   M5Cardputer.Display.setTextColor(TFT_WHITE);
   M5Cardputer.Display.setCursor(x + 4, y + 3);
   M5Cardputer.Display.setTextSize(1);
   M5Cardputer.Display.printf("%-1s", statusChar);
-  Serial.printf("drawStatus");
 }
 
 /*    Draw configuration popup.
@@ -452,23 +488,67 @@ void drawConfig(bool should_I) {
       gpsSerial = false;
       initGPSSerial(false);
     }
-    M5Cardputer.Display.fillRect(18, 18, 204, 99, TFT_BLACK);
-    M5Cardputer.Display.drawRect(20, 20, 200, 95, TFT_GREEN);
+    M5Cardputer.Display.fillRect(10, 10, screenW-20, screenH-20, TFT_BLACK);
+    M5Cardputer.Display.drawRect(12, 12, screenW-24, screenH-24, TFT_GREEN);
     M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5Cardputer.Display.setTextSize(1);
     M5Cardputer.Display.setCursor(25, 25);
-    M5Cardputer.Display.println("Configurations:");
+    M5Cardputer.Display.printf("Configurations (MicroSD:%s,%s):\n", sdAvailable ? "Yes" : "No", sdErr ? "ERR" : "OK");
     M5Cardputer.Display.setCursor(25, 35);
-    M5Cardputer.Display.println("Nav: [Left/Right]. Val: [0-9].");
+    M5Cardputer.Display.println("Nav: [Up/Dow]. Val: [0-9].");
     M5Cardputer.Display.setCursor(25, 45);
-    M5Cardputer.Display.println("Ext:[c]. Sav:[ok].");
-    M5Cardputer.Display.setCursor(30, 70);
-    M5Cardputer.Display.printf("TX pin (std:15 act:%d): %s %s", gpsTxPin, tempPins[0].c_str(), configsMenuSel == 0 ? "<" : " ");
-    M5Cardputer.Display.setCursor(30, 80);
-    M5Cardputer.Display.printf("RX pin (std:13 act:%d): %s %s", gpsRxPin, tempPins[1].c_str(), configsMenuSel == 1 ? "<" : " ");
+    M5Cardputer.Display.println("Exit: [c]. Save: [ok].");
+    M5Cardputer.Display.setCursor(25, 70);
+    M5Cardputer.Display.printf("Cardp. RX pin (act:%d): %s %s", gpsRxPin, configsTmp[0].c_str(), configsMenuSel == 0 ? "<" : " ");
+    M5Cardputer.Display.setCursor(25, 80);
+    M5Cardputer.Display.printf("Cardp. TX pin (act:%d): %s %s", gpsTxPin, configsTmp[1].c_str(), configsMenuSel == 1 ? "<" : " ");
+    M5Cardputer.Display.setCursor(25, 90);
+    M5Cardputer.Display.printf("Cardp. Baud (act:%d): %s %s", gpsBaud, configsTmp[2].c_str(), configsMenuSel == 2 ? "<" : " ");
   }
   else
     updateScreen(true); // Forced update.
+}
+
+/*    Store configuration from microSD.
+*/
+void saveConfig() {
+  if (!sdAvailable) return;
+  File file = SD.open(CONFIG_FILE, FILE_WRITE);
+  if (!file) {
+    sdErr = true;
+    return;
+  }
+  else
+    sdErr = false;
+  file.printf("gpsRxPin=%d\n", gpsRxPin);
+  file.printf("gpsTxPin=%d\n", gpsTxPin);
+  file.printf("gpsBaud=%d\n", gpsBaud);
+  file.close();
+}
+
+/*    Load configuration from microSD.
+*/
+void loadConfig() {
+  if (!sdAvailable) return;
+  if (!SD.exists(CONFIG_FILE)) {
+    saveConfig();
+    return;
+  }
+  File file = SD.open(CONFIG_FILE);
+  if (!file) {
+    sdErr = true;
+    return;
+  }
+  else
+    sdErr = false;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("gpsRxPin=")) gpsRxPin = line.substring(9).toInt();
+    else if (line.startsWith("gpsTxPin=")) gpsTxPin = line.substring(9).toInt();
+    else if (line.startsWith("gpsBaud=")) gpsBaud = line.substring(8).toInt();
+  }
+  file.close();
 }
 
 /*    Draw info popup.
@@ -478,7 +558,7 @@ void drawInfo(bool should_I) {
     openMenu = true;
     const char* helpText[] = {
       "Cardputer GPS Info",
-      "V 1.0 by alcor55",
+      "V " APP_VERSION " by alcor55",
       "",
       "Github:",
       "https://github.com/alcor55",
@@ -512,9 +592,9 @@ void drawHelp(bool should_I) {
       "[c] Configuration menu.",
       "[h] Help menu (this).",
       "[i] Info menu.",
-      "[l] Print in the usb serial",
+      "[l] Print in usb serial (115200)",
       " console the satellites list.",
-      "[n] Print in the usb serial",
+      "[n] Print in usb serial (115200)",
       " console the NMEA sentences.",
       "[p] Show/hide ID on skyplot.",
       "[o] Show/hide System on skyplot."
@@ -559,24 +639,25 @@ void handleKeys() {
         for (auto c : status.word) {
           // Arrow selection vertical up.
           if (c == ';' || c == '.')
-            configsMenuSel = (configsMenuSel == 0) ? 1 : 0;
+            configsMenuSel = (configsMenuSel + 1) % 3;
           // Numbers 0-9.
           if (c >= 48 && c <= 57) {
-            // Max 2 digit.
-            if (tempPins[configsMenuSel].length() < 2)
-              tempPins[configsMenuSel] += c;
+            configsTmp[configsMenuSel] += c;
           }
         }
         // Delete.
-        if (status.del && tempPins[configsMenuSel].length() > 0)
-          tempPins[configsMenuSel].remove(tempPins[configsMenuSel].length() - 1);
+        if (status.del && configsTmp[configsMenuSel].length() > 0)
+          configsTmp[configsMenuSel].remove(configsTmp[configsMenuSel].length() - 1);
         // Store.
         if (status.enter) {
-          if (tempPins[0].length() > 0)
-            gpsTxPin = tempPins[0].toInt();
-          if (tempPins[1].length() > 0)
-            gpsRxPin = tempPins[1].toInt();
-          tempPins[0] = tempPins[1] = "";
+          if (configsTmp[0].length() > 0)
+            gpsRxPin = configsTmp[0].toInt();
+          if (configsTmp[1].length() > 0)
+            gpsTxPin = configsTmp[1].toInt();
+          if (configsTmp[2].length() > 0)
+            gpsBaud = configsTmp[2].toInt();
+          if (sdAvailable) saveConfig();
+          configsTmp[0] = configsTmp[1] = configsTmp[2] = "";
           configsMenu = false;
           updateScreen(true);
           return;
@@ -592,9 +673,10 @@ void handleKeys() {
 void handleControls() {
   // Handle S key for Start/Stop.
   if (M5Cardputer.Keyboard.isKeyPressed('s')) {
-    gpsSerial = !gpsSerial; // Invert status.
+    gpsSerial = !gpsSerial;
     initGPSSerial(gpsSerial);
-    delay(300); // Debounce.
+    gpsSerialState = gpsSerial ? GPS_ON : GPS_OFF;
+    delay(300);
     drawStatus();
   }
   // Handle C key for Config.
@@ -649,6 +731,12 @@ void setup() {
   auto cfg = M5.config();
   M5Cardputer.begin(cfg); // Init Cardputer.
   M5Cardputer.Display.setBrightness(32); // Set brightness 0-255.
+  lastValidGpsMillis = millis();
+  if (SD.begin()) {
+    sdAvailable = true;
+    loadConfig();
+  } else
+    sdAvailable = false;
   updateScreen(true); // Forced first update.
 }
 

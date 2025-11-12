@@ -5,6 +5,17 @@ It reads GPS data via UART and displays location, speed, course, satellite visib
 
 <img src="https://raw.githubusercontent.com/alcor55/Cardputer-GPS-Info/main/1.jpeg" alt="Screenshot 1" width="30%">
 
+## Changelog
+1.0.0 - First release.
+1.1.0 - Added configuration file support on microSD (cpGpsInfo.conf) to store GPS RX/TX pins and baudrate.
+      - Added ability to modify GPS baudrate.
+      - Fixed minor bugs.
+      - Added GPS error state (on,off,err).
+
+## ToDo
+- Improve gps error handling.
+- Add a reference popup with pin and baurare for the most used gps models.
+
 ## Features
 
 - Display GPS data: Latitude, Longitude, Altitude, Speed, Course, Date, Time, HDOP
