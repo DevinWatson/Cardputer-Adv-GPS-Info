@@ -17,32 +17,38 @@ It reads GPS data via UART and displays location, speed, course, satellite visib
 <img src="scr_0003.bmp" alt="Screenshot 11" width="30%">
 
 ## Changelog
-1.0.0 - First release.
-1.1.0 - Added configuration file support on microSD (cpGpsInfo.conf) to store GPS RX/TX pins and baudrate.
-      - Added ability to modify GPS baudrate.
-      - Fixed minor bugs.
-      - Added GPS error state (on,off,err).
-1.3.0 - Adapted for Cardputer ADV with Cap LoRa-1262 (shared SPI bus, UART2, default pins RX:15/TX:13).
-      - Added QZSS satellite support.
-      - Added GGA sentence parsing (fix quality, geoid separation).
-      - Added GSA PDOP/VDOP parsing.
-      - Replaced HDOP display with Fix quality + mode (e.g. "GPS 3D", "DGPS 2D", "RTK 3D").
-      - Status bar now shows 2D/3D fix mode and baudrate in kHz format.
-      - Reorganized satellite stats column (Visb, Used, PDOP, HDOP, VDOP, GP/GL, GA/BD, QZ).
-      - Changed default UART to UART2, default baud to 115200 (ATGM336H).
-      - SPI3 (HSPI) used for SD card to avoid conflict with display SPI.
-      - LoRa NSS held HIGH to prevent SPI bus contention.
-2.0.0 - Major rewrite with 15 switchable screens and off-screen frame buffer rendering.
-      - Added screens: Sky View, Signal Bars, Fix Summary, Dashboard, Coordinates, Breadcrumb Track, Altitude Profile, Speed Graph, Trip Stats, Constellation, NMEA Monitor, GPS Clock, World Map, 3D Globe.
-      - Added world coastline map data (Natural Earth) with zoom support.
-      - Added 3D satellite globe visualization.
-      - Added IMU support (BMI270) for pitch, roll, G-force readings.
-      - Added trip statistics (distance, max speed, ascent/descent, moving time).
-      - Added track recording buffer (breadcrumb trail).
-      - Added auto-slideshow mode for cycling through screens.
-      - Added screenshot-over-serial (Enter key).
-      - Removed SD card / config file dependency (hardcoded for ADV + Cap LoRa-1262).
-      - Added PlatformIO project support (platformio.ini).
+
+### 2.0.0
+- Major rewrite with 15 switchable screens and off-screen frame buffer rendering
+- Added screens: Sky View, Signal Bars, Fix Summary, Dashboard, Coordinates, Breadcrumb Track, Altitude Profile, Speed Graph, Trip Stats, Constellation, NMEA Monitor, GPS Clock, World Map, 3D Globe
+- Added world coastline map data (Natural Earth) with zoom support
+- Added 3D satellite globe visualization
+- Added trip statistics (distance, max speed, ascent/descent, moving time)
+- Added track recording buffer (breadcrumb trail)
+- Added auto-slideshow mode for cycling through screens
+- Added screenshot-over-serial (Enter key)
+- Added PlatformIO project support (platformio.ini)
+
+### 1.3.0
+- Adapted for Cardputer ADV with Cap LoRa-1262 (shared SPI bus, UART2, default pins RX:15/TX:13)
+- Added QZSS satellite support
+- Added GGA sentence parsing (fix quality, geoid separation)
+- Added GSA PDOP/VDOP parsing
+- Replaced HDOP display with Fix quality + mode (e.g. "GPS 3D", "DGPS 2D", "RTK 3D")
+- Status bar now shows 2D/3D fix mode and baudrate in kHz format
+- Reorganized satellite stats column (Visb, Used, PDOP, HDOP, VDOP, GP/GL, GA/BD, QZ)
+- Changed default UART to UART2, default baud to 115200 (ATGM336H)
+- SPI3 (HSPI) used for SD card to avoid conflict with display SPI
+- LoRa NSS held HIGH to prevent SPI bus contention
+
+### 1.1.0
+- Added configuration file support on microSD (cpGpsInfo.conf) to store GPS RX/TX pins and baudrate
+- Added ability to modify GPS baudrate
+- Fixed minor bugs
+- Added GPS error state (on,off,err)
+
+### 1.0.0
+- First release
 
 ## Screens
 
