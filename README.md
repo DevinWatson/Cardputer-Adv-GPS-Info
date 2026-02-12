@@ -5,7 +5,8 @@ It reads GPS data via UART and displays location, speed, course, satellite visib
 
 <img src="scr_0002.bmp" alt="Screenshot 1" width="30%">
 <img src="scr_0017.bmp" alt="Screenshot 2" width="30%">
-<img src="scr_0023.bmp" alt="Screenshot 3" width="30%">
+<img src="scr_0026.bmp" alt="Screenshot 3" width="30%">
+<img src="scr_0023.bmp" alt="Screenshot 4" width="30%">
 <img src="scr_0001.bmp" alt="Screenshot 4" width="30%">
 <img src="scr_0004.bmp" alt="Screenshot 5" width="30%">
 <img src="scr_0020.bmp" alt="Screenshot 6" width="30%">
@@ -42,10 +43,6 @@ It reads GPS data via UART and displays location, speed, course, satellite visib
       - Added screenshot-over-serial (Enter key).
       - Removed SD card / config file dependency (hardcoded for ADV + Cap LoRa-1262).
       - Added PlatformIO project support (platformio.ini).
-
-## ToDo
-- Improve GPS error handling.
-- Add a reference popup with pin and baudrate for the most used GPS models.
 
 ## Screens
 
@@ -92,8 +89,6 @@ The application features 15 screens, navigable with `[<]`/`[>]` keys or direct j
 - Screenshot capture over USB serial
 - Off-screen frame buffer for flicker-free rendering
 
-<img src="https://raw.githubusercontent.com/alcor55/Cardputer-GPS-Info/main/6.jpeg" alt="Screenshot 1" width="30%">
-
 - Keyboard controls:
   - `[s]` Start/Stop GPS serial
   - `[c]` Configuration menu
@@ -110,17 +105,12 @@ The application features 15 screens, navigable with `[<]`/`[>]` keys or direct j
   - `[z/x]` Zoom in/out on map screen
   - `[Enter]` Send screenshot over USB serial
 
-<img src="https://raw.githubusercontent.com/alcor55/Cardputer-GPS-Info/main/2.jpeg" alt="Screenshot 2" width="30%">
-<img src="https://raw.githubusercontent.com/alcor55/Cardputer-GPS-Info/main/3.jpeg" alt="Screenshot 3" width="30%">
-
 ## Hardware
 
 - M5Stack Cardputer ADV
 - Cap LoRa-1262 module (provides ATGM336H GPS via UART2, shared SPI bus for SD + LoRa)
 - Default pins: RX 15, TX 13 (EXT header on Cap LoRa-1262)
 - Default baud: 115200
-
-<img src="https://raw.githubusercontent.com/alcor55/Cardputer-GPS-Info/main/4.jpeg" alt="Screenshot 4" width="30%">
 
 ## Building
 
