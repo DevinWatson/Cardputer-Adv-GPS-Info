@@ -4,6 +4,16 @@ Cardputer ADV GPS Info is a feature-rich GPS information tool for the M5Stack Ca
 It reads GPS data via UART and displays location, speed, course, satellite visibility, sky plots, world map, 3D globe, and much more across 15 switchable screens.
 
 <img src="scr_0002.bmp" alt="Screenshot 1" width="30%">
+<img src="scr_0017.bmp" alt="Screenshot 2" width="30%">
+<img src="scr_0023.bmp" alt="Screenshot 3" width="30%">
+<img src="scr_0001.bmp" alt="Screenshot 4" width="30%">
+<img src="scr_0004.bmp" alt="Screenshot 5" width="30%">
+<img src="scr_0020.bmp" alt="Screenshot 6" width="30%">
+<img src="scr_0019.bmp" alt="Screenshot 7" width="30%">
+<img src="scr_0021.bmp" alt="Screenshot 8" width="30%">
+<img src="scr_0022.bmp" alt="Screenshot 9" width="30%">
+<img src="scr_0024.bmp" alt="Screenshot 10" width="30%">
+<img src="scr_0003.bmp" alt="Screenshot 11" width="30%">
 
 ## Changelog
 1.0.0 - First release.
