@@ -111,6 +111,20 @@ The application features 15 screens, navigable with `[<]`/`[>]` keys or direct j
   - `[z/x]` Zoom in/out on map screen
   - `[Enter]` Send screenshot over USB serial
 
+## Utilities
+
+The `utils/` folder contains helper scripts for development:
+
+- **`convert_geodata.py`** — Converts [Natural Earth](https://www.naturalearthdata.com/) GeoJSON files (10m/50m resolution) into a compact PROGMEM C header (`src/map_data.h`) for the ESP32. Applies Douglas-Peucker simplification, auto-tunes per-layer tolerance to fit a 2.4 MB flash budget, and adds bounding-box headers for fast viewport culling at runtime. Requires GeoJSON source files in a `geodata/` directory.
+  ```
+  python utils/convert_geodata.py
+  ```
+
+- **`serial_screenshot.py`** — Captures screenshots sent over USB serial when the Enter key is pressed on the Cardputer. Listens for RGB565 pixel data and saves as BMP files. Requires the `pyserial` package.
+  ```
+  python utils/serial_screenshot.py [COM_PORT]
+  ```
+
 ## Hardware
 
 - M5Stack Cardputer ADV
