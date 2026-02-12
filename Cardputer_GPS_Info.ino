@@ -1,17 +1,28 @@
 #include <M5Cardputer.h>
+#include <SPI.h>
 #include <vector>
 #include <algorithm>
 #include <TinyGPSPlus.h>
 #include <SD.h>
 #include <FS.h>
 
-#define APP_VERSION "1.1.0"
+#define APP_VERSION "1.3.0"
+
+// Cap LoRa-1262 shared SPI bus pins (SD card + LoRa share these).
+#define SPI_SCK    40
+#define SPI_MISO   39
+#define SPI_MOSI   14
+#define SD_CS      12  // SD card chip select.
+#define LORA_NSS    5  // LoRa chip select (hold HIGH to prevent bus contention).
 
 #define CONFIG_FILE "/cpGpsInfo.conf"
 bool sdAvailable = false;
 bool sdErr = false;
 
-HardwareSerial GPS_Serial(1); // Use UART1 for GPS.
+// Use SPI3 (HSPI) for SD card to avoid conflict with display on SPI2 (FSPI).
+SPIClass sdSPI(SPI3_HOST);
+
+HardwareSerial GPS_Serial(2); // Use UART2 for GPS (Cap LoRa-1262 ATGM336H).
 TinyGPSPlus gps;
 
 struct SatData {
@@ -31,8 +42,17 @@ struct GSVSequenceState {
     int lastMsgNum = 0;
     std::vector<int> currentVisible;
 };
-GSVSequenceState gsvStates[5];
+GSVSequenceState gsvStates[6]; // GPS, GLONASS, Galileo, BeiDou, QZSS, Mixed.
 int gsvCount = 0;
+
+// GGA fix quality and GSA fix mode data.
+int ggaFixQuality = 0;    // 0=Invalid, 1=GPS, 2=DGPS, 4=RTK, 5=Float RTK.
+int gsaFixMode = 1;       // 1=No fix, 2=2D, 3=3D.
+float pdop = 99.9;
+float vdop = 99.9;
+float geoidHeight = 0.0;
+bool geoidValid = false;
+int qzssVisible = 0;
 
 bool gpsSerial = false;
 bool debugSerial = false;
@@ -47,9 +67,9 @@ bool configsMenu = false;
 int configsMenuSel = 0;
 String configsTmp[3] = {"", "", ""};  // 0 Rx, 1 Tx, 2 Baud.
 
-int gpsRxPin = 1; // Cardputer Rx pin <- GPS Tx pin.
-int gpsTxPin = 2; // Cardputer Tx pin <- GPS Rx pin.
-int gpsBaud = 9600;
+int gpsRxPin = 15; // Cardputer ADV Rx pin <- GPS Tx pin (Cap LoRa-1262 EXT header).
+int gpsTxPin = 13; // Cardputer ADV Tx pin <- GPS Rx pin (Cap LoRa-1262 EXT header).
+int gpsBaud = 115200; // ATGM336H default baud rate.
 
 enum GPSState { GPS_OFF, GPS_ON, GPS_ERR };
 GPSState gpsSerialState = GPS_OFF;
@@ -115,13 +135,16 @@ void nmeaDispatcher(const String &nmeaLine) {
     {"$GLGSV", parseGSV},
     {"$GAGSV", parseGSV},
     {"$BDGSV", parseGSV},
+    {"$GQGSV", parseGSV},  // QZSS satellites.
     {"$GNGSV", parseGSV},
     {"$GPGSA", parseGSA},
     {"$GLGSA", parseGSA},
     {"$GAGSA", parseGSA},
     {"$BDGSA", parseGSA},
-    {"$GNGSA", parseGSA}
-    //{"$GPGGA", parseGGA}
+    {"$GQGSA", parseGSA},  // QZSS fix data.
+    {"$GNGSA", parseGSA},
+    {"$GPGGA", parseGGA},  // GPS fix data.
+    {"$GNGGA", parseGGA}   // Multi-constellation fix data.
   };
   // Dispatch to the correct parser.
   for (auto &h : handlers) {
@@ -137,16 +160,49 @@ void nmeaDispatcher(const String &nmeaLine) {
 */
 void parseGSA(const String &line) {
   int fieldNum = 0, lastIndex = 0;
-  for (int i = 0; i <= line.length(); i++) {
-    if (i == line.length() || line[i] == ',' || line[i] == '*') {
+  for (int i = 0; i <= (int)line.length(); i++) {
+    if (i == (int)line.length() || line[i] == ',' || line[i] == '*') {
       String val = line.substring(lastIndex, i);
       lastIndex = i + 1;
       fieldNum++;
+      // Field 2: Fix mode (1=No fix, 2=2D, 3=3D).
+      if (fieldNum == 3 && val.length() > 0)
+        gsaFixMode = val.toInt();
+      // Fields 3-14: Satellite IDs used in fix.
       if (fieldNum >= 4 && fieldNum <= 15 && val.length() > 0) {
         int id = val.toInt();
         for (auto &sat : satellites) {
           if (sat.id == id) sat.used = true;
         }
+      }
+      // Field 15: PDOP.
+      if (fieldNum == 16 && val.length() > 0)
+        pdop = val.toFloat();
+      // Field 16: HDOP (TinyGPSPlus handles this, skip).
+      // Field 17: VDOP.
+      if (fieldNum == 18 && val.length() > 0)
+        vdop = val.toFloat();
+    }
+  }
+}
+
+/*    Parse NMEA 0183 GGA sentence. (Global Positioning System Fix Data).
+*     Fix quality, geoid separation, number of satellites used.
+*/
+void parseGGA(const String &line) {
+  int fieldNum = 0, lastIndex = 0;
+  for (int i = 0; i <= (int)line.length(); i++) {
+    if (i == (int)line.length() || line[i] == ',' || line[i] == '*') {
+      String val = line.substring(lastIndex, i);
+      lastIndex = i + 1;
+      fieldNum++;
+      // Field 6: Fix quality (0=Invalid, 1=GPS, 2=DGPS, 4=RTK, 5=Float RTK).
+      if (fieldNum == 7 && val.length() > 0)
+        ggaFixQuality = val.toInt();
+      // Field 11: Geoid separation (meters).
+      if (fieldNum == 12 && val.length() > 0) {
+        geoidHeight = val.toFloat();
+        geoidValid = true;
       }
     }
   }
@@ -161,6 +217,7 @@ void parseGSV(const String &line) {
   else if (line.startsWith("$GLGSV")) system = "GLONASS";
   else if (line.startsWith("$GAGSV")) system = "Galileo";
   else if (line.startsWith("$BDGSV")) system = "BeiDou";
+  else if (line.startsWith("$GQGSV")) system = "QZSS";
   else if (line.startsWith("$GNGSV")) system = "Mixed";
   else return;
   GSVSequenceState* state = getGSVState(system);
@@ -245,7 +302,7 @@ void initDebugSerial(bool should_I) {
     Serial.setTimeout( 2000 );
     while( !Serial ){}  // Wait for serial to initialize.
     delay( 100 );
-    Serial.println( "\n\n\n Initialited Cardputer GPS INFO serial console!" );
+    Serial.println( "\n\n\n Initialited Cardputer ADV GPS INFO serial console!" );
   } else if (!should_I && debugSerial) {
     debugSerial = false;
     Serial.end();
@@ -353,6 +410,7 @@ void drawSkyPlot() {
       else if (sat.system == "GLONASS") sys = "Gl";
       else if (sat.system == "Galileo") sys = "Ga";
       else if (sat.system == "BeiDou") sys = "Bd";
+      else if (sat.system == "QZSS") sys = "Qz";
       else sys = "?";
       M5Cardputer.Display.setTextSize(0);
       M5Cardputer.Display.setTextColor(TFT_BLACK);
@@ -372,17 +430,28 @@ void drawSatelliteDataTab(){
   int y = 26;
   // Column 1.
   // Labels.
-  const char* c1labels[] = { "Lat", "Lng", "Alt", "Spd", "Crs", "Date", "Time", "HDOP" };
+  const char* c1labels[] = { "Lat", "Lng", "Alt", "Spd", "Crs", "Date", "Time", "Fix" };
   // Values.
   char c1values[8][20];
   if (gps.location.isValid()) {sprintf(c1values[0], "%.6f", gps.location.lat());} else {sprintf(c1values[0], "NoFix");}
   if (gps.location.isValid()) {sprintf(c1values[1], "%.6f", gps.location.lng());} else {sprintf(c1values[1], "NoFix");}
-  if (gps.altitude.isValid()) {sprintf(c1values[2], "%.2f", gps.altitude.meters());} else {sprintf(c1values[2], "NoData");}
+  if (gps.altitude.isValid()) {sprintf(c1values[2], "%.1fm", gps.altitude.meters());} else {sprintf(c1values[2], "NoData");}
   sprintf(c1values[3], "%.1f", gps.speed.kmph());
   sprintf(c1values[4], "%.1f", gps.course.deg());
   if (gps.date.isValid()) {sprintf(c1values[5], "%02d/%02d/%02d", gps.date.day(), gps.date.month(), gps.date.year() % 100);} else {sprintf(c1values[5], "NoData");}
   if (gps.time.isValid()) {sprintf(c1values[6], "%02d:%02d:%02d", gps.time.hour(), gps.time.minute(), gps.time.second());} else {sprintf(c1values[6], "NoData");}
-  sprintf(c1values[7], "%.1f", gps.hdop.hdop());
+  // Fix: quality + mode (e.g. "GPS 3D" or "DGPS 2D").
+  {
+    const char* fixQ = "None";
+    if (ggaFixQuality == 1) fixQ = "GPS";
+    else if (ggaFixQuality == 2) fixQ = "DGPS";
+    else if (ggaFixQuality == 4) fixQ = "RTK";
+    else if (ggaFixQuality == 5) fixQ = "FRTK";
+    const char* fixM = "";
+    if (gsaFixMode == 2) fixM = " 2D";
+    else if (gsaFixMode == 3) fixM = " 3D";
+    sprintf(c1values[7], "%s%s", fixQ, fixM);
+  }
   // Draw.
   for (int i = 0; i < 8; i++) {
     M5Cardputer.Display.fillRect(x, y, 90, 13, TFT_BLACK);
@@ -397,16 +466,16 @@ void drawSatelliteDataTab(){
   y = 26;
   x += 89;
   // Labels.
-  const char* c2labels[] = { "Seen", "Visb", "Used", "InFx", "GPS", "Gln", "Gal", "BDo" };
+  const char* c2labels[] = { "Visb", "Used", "PDOP", "HDOP", "VDOP", "GP/GL", "GA/BD", "QZ" };
   // Values.
   char c2values[8][12];
-  int totalAll = satellites.size(); // Ever seen.
-  int totalUsed = 0;                // Ever used in fix.
-  int totalVisible = 0;             // Now visible.
+  int totalVisible = 0;
+  int totalUsed = 0;
   int gpsVisible = 0;
   int glonassVisible = 0;
   int galileoVisible = 0;
   int beidouVisible = 0;
+  qzssVisible = 0;
   for (auto &sat : satellites) {
     if (sat.used) totalUsed++;
     if (sat.visible) {
@@ -415,16 +484,17 @@ void drawSatelliteDataTab(){
       else if (sat.system == "GLONASS") glonassVisible++;
       else if (sat.system == "Galileo") galileoVisible++;
       else if (sat.system == "BeiDou") beidouVisible++;
+      else if (sat.system == "QZSS") qzssVisible++;
     }
   }
-  sprintf(c2values[0], "%d", totalAll);
-  sprintf(c2values[1], "%d", totalVisible);
-  sprintf(c2values[2], "%d", totalUsed);
-  if (gps.satellites.isValid()) {sprintf(c2values[3], "%d", gps.satellites.value());} else {sprintf(c2values[3], "0");} // Now in the fix.
-  sprintf(c2values[4], "%d", gpsVisible);
-  sprintf(c2values[5], "%d", glonassVisible);
-  sprintf(c2values[6], "%d", galileoVisible);
-  sprintf(c2values[7], "%d", beidouVisible);
+  sprintf(c2values[0], "%d/%d", totalVisible, (int)satellites.size());
+  if (gps.satellites.isValid()) {sprintf(c2values[1], "%d", gps.satellites.value());} else {sprintf(c2values[1], "%d", totalUsed);}
+  sprintf(c2values[2], "%.1f", pdop);
+  sprintf(c2values[3], "%.1f", gps.hdop.hdop());
+  sprintf(c2values[4], "%.1f", vdop);
+  sprintf(c2values[5], "%d/%d", gpsVisible, glonassVisible);
+  sprintf(c2values[6], "%d/%d", galileoVisible, beidouVisible);
+  sprintf(c2values[7], "%d", qzssVisible);
   // Draw.
   for (int i = 0; i < 8; i++) {
     M5Cardputer.Display.fillRect(x, y, 53, 13, TFT_BLACK);
@@ -449,7 +519,7 @@ void drawHeader(){
   M5Cardputer.Display.fillRect(x, y, w, h, TFT_GREEN); // bordo nel colore del testo
   M5Cardputer.Display.setTextColor(TFT_BLACK);      // testo e sfondo
   M5Cardputer.Display.setCursor(x + 4, y + 3);
-  M5Cardputer.Display.printf("%-1s", "      -= Cardputer GPS Info =-");
+  M5Cardputer.Display.printf("%-1s", "    -= Cardputer ADV GPS Info =-");
   // Key map.
   M5Cardputer.Display.drawRect(x, y+h-1, w, h, TFT_GREEN);
   M5Cardputer.Display.setTextColor(TFT_GREEN);
@@ -467,12 +537,16 @@ void drawStatus(){
   char statusChar[64];
   statusChar[0] = '\0';
   const char* gpsStr = "Off";
-  if (gpsSerialState == GPS_ON) gpsStr = "On";
+  if (gpsSerialState == GPS_ON) {
+    if (gsaFixMode == 3) gpsStr = "3D";
+    else if (gsaFixMode == 2) gpsStr = "2D";
+    else gpsStr = "On";
+  }
   else if (gpsSerialState == GPS_ERR) gpsStr = "Err";
   snprintf(statusChar + strlen(statusChar), sizeof(statusChar) - strlen(statusChar),"GP:%s ", gpsStr);
   snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"Rx:%d Tx:%d ", gpsRxPin, gpsTxPin);
-  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"Bd:%d ", gpsBaud);
-  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"| Cnsl:%s", debugSerial ? "On" : "Off");
+  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar),"Bd:%dk", gpsBaud / 1000);
+  snprintf(statusChar + strlen(statusChar),sizeof(statusChar) - strlen(statusChar)," | Cnsl:%s", debugSerial ? "On" : "Off");
   M5Cardputer.Display.fillRect(x, y, w, h, TFT_DARKGREY);
   M5Cardputer.Display.setTextColor(TFT_WHITE);
   M5Cardputer.Display.setCursor(x + 4, y + 3);
@@ -499,11 +573,11 @@ void drawConfig(bool should_I) {
     M5Cardputer.Display.setCursor(25, 45);
     M5Cardputer.Display.println("Exit: [c]. Save: [ok].");
     M5Cardputer.Display.setCursor(25, 70);
-    M5Cardputer.Display.printf("Cardp. RX pin (act:%d): %s %s", gpsRxPin, configsTmp[0].c_str(), configsMenuSel == 0 ? "<" : " ");
+    M5Cardputer.Display.printf("ADV RX pin (act:%d): %s %s", gpsRxPin, configsTmp[0].c_str(), configsMenuSel == 0 ? "<" : " ");
     M5Cardputer.Display.setCursor(25, 80);
-    M5Cardputer.Display.printf("Cardp. TX pin (act:%d): %s %s", gpsTxPin, configsTmp[1].c_str(), configsMenuSel == 1 ? "<" : " ");
+    M5Cardputer.Display.printf("ADV TX pin (act:%d): %s %s", gpsTxPin, configsTmp[1].c_str(), configsMenuSel == 1 ? "<" : " ");
     M5Cardputer.Display.setCursor(25, 90);
-    M5Cardputer.Display.printf("Cardp. Baud (act:%d): %s %s", gpsBaud, configsTmp[2].c_str(), configsMenuSel == 2 ? "<" : " ");
+    M5Cardputer.Display.printf("ADV Baud (act:%d): %s %s", gpsBaud, configsTmp[2].c_str(), configsMenuSel == 2 ? "<" : " ");
   }
   else
     updateScreen(true); // Forced update.
@@ -557,8 +631,8 @@ void drawInfo(bool should_I) {
   if (should_I == true) {
     openMenu = true;
     const char* helpText[] = {
-      "Cardputer GPS Info",
-      "V " APP_VERSION " by alcor55",
+      "Cardputer ADV GPS Info",
+      "V " APP_VERSION " (ADV) by alcor55",
       "",
       "Github:",
       "https://github.com/alcor55",
@@ -729,10 +803,16 @@ void handleControls() {
 */
 void setup() {
   auto cfg = M5.config();
-  M5Cardputer.begin(cfg); // Init Cardputer.
-  M5Cardputer.Display.setBrightness(32); // Set brightness 0-255.
+  M5Cardputer.begin(cfg); // Init Cardputer ADV.
+  M5Cardputer.Display.setRotation(1);
+  M5Cardputer.Display.setBrightness(128); // Set brightness 0-255.
   lastValidGpsMillis = millis();
-  if (SD.begin()) {
+  // Hold LoRa NSS HIGH to prevent SPI bus contention (shared bus with SD card).
+  pinMode(LORA_NSS, OUTPUT);
+  digitalWrite(LORA_NSS, HIGH);
+  // Init SD card on SPI3 (HSPI) to keep display SPI2 (FSPI) undisturbed.
+  sdSPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SD_CS);
+  if (SD.begin(SD_CS, sdSPI)) {
     sdAvailable = true;
     loadConfig();
   } else
