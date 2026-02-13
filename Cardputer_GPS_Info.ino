@@ -4,7 +4,7 @@
 #include <TinyGPSPlus.h>
 #include <time.h>
 
-#define APP_VERSION "2.0.0"
+#define APP_VERSION "2.0.1"
 
 
 HardwareSerial GPS_Serial(2); // Use UART2 for GPS (Cap LoRa-1262 ATGM336H).
