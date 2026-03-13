@@ -4,7 +4,7 @@
 #include <TinyGPSPlus.h>
 #include <time.h>
 
-#define APP_VERSION "2.0.0"
+#define APP_VERSION "2.0.1"
 
 
 HardwareSerial GPS_Serial(2); // Use UART2 for GPS (Cap LoRa-1262 ATGM336H).
@@ -59,6 +59,7 @@ enum ScreenID {
   SCR_GPS_CLOCK,
   SCR_GPS_MAP,
   SCR_3D_GLOBE,
+  SCR_WAYPOINT,
   SCR_COUNT
 };
 
@@ -71,7 +72,7 @@ const char* screenNames[] = {
   "Main", "Sky View", "Signal", "Fix Info",
   "Dashboard", "Coords", "Track",
   "Altitude", "Speed", "Trip", "Sats",
-  "NMEA", "Clock", "Map", "Globe"
+  "NMEA", "Clock", "Map", "Globe", "Waypoint"
 };
 
 int mapZoom = 0;
@@ -142,6 +143,14 @@ int gpsRxPin = 15; // Cardputer ADV Rx pin <- GPS Tx pin (Cap LoRa-1262 EXT head
 int gpsTxPin = 13; // Cardputer ADV Tx pin <- GPS Rx pin (Cap LoRa-1262 EXT header).
 int gpsBaud = 115200; // ATGM336H default baud rate.
 
+// ---- Waypoint navigation ----
+bool waypointSet = false;        // True when a target waypoint is active.
+float waypointLat = 0.0;         // Target latitude.
+float waypointLon = 0.0;         // Target longitude.
+bool waypointEditing = false;    // True when in coordinate entry mode.
+int waypointField = 0;           // 0=lat, 1=lon.
+String waypointTmp[2] = {"", ""}; // Temporary input buffers for lat/lon.
+
 enum GPSState { GPS_OFF, GPS_ON, GPS_ERR };
 GPSState gpsSerialState = GPS_OFF;
 const unsigned long GPS_TIMEOUT = 1000;
@@ -201,6 +210,18 @@ const char* cardinalFromHeading(float heading) {
   const char* dirs[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
   int idx = (int)((heading + 22.5) / 45.0) % 8;
   return dirs[idx];
+}
+
+/*    Bearing in degrees from point 1 to point 2 (forward azimuth).
+*/
+float bearingTo(float lat1, float lon1, float lat2, float lon2) {
+  float dLon = radians(lon2 - lon1);
+  float la1 = radians(lat1);
+  float la2 = radians(lat2);
+  float y = sin(dLon) * cos(la2);
+  float x = cos(la1) * sin(la2) - sin(la1) * cos(la2) * cos(dLon);
+  float brng = atan2(y, x) * 180.0 / M_PI;
+  return fmod(brng + 360.0, 360.0);
 }
 
 /*    Format milliseconds as HH:MM:SS.
@@ -305,9 +326,25 @@ void updateTripStats() {
 
 /*    Open or close the GPS UART serial console.
 */
+/*    Send a PMTK command to the GPS module with computed checksum.
+*/
+void sendPMTK(const char* body) {
+  uint8_t ck = 0;
+  for (const char* p = body; *p; p++) ck ^= *p;
+  char cmd[80];
+  snprintf(cmd, sizeof(cmd), "$%s*%02X\r\n", body, ck);
+  GPS_Serial.print(cmd);
+}
+
 void initGPSSerial(bool should_I) {
-  if (should_I == true)
+  if (should_I == true) {
     GPS_Serial.begin(gpsBaud, SERIAL_8N1, gpsRxPin, gpsTxPin); // Start GPS UART.
+    delay(200);
+    // Enable GGA, GLL, GSA, GSV, RMC, VTG sentence output (PCAS03 for ATGM336H).
+    sendPMTK("PCAS03,1,1,1,1,1,1,0,0");
+    // Also try PMTK for non-ATGM336H modules.
+    sendPMTK("PMTK314,1,1,1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0");
+  }
   else
     GPS_Serial.end();
 }
@@ -2136,6 +2173,213 @@ void drawScreen3DGlobe() {
   frameBuf.print(buf);
 }
 
+// ------------------------------------------------------------------
+//  Screen 15: SCR_WAYPOINT  (Waypoint entry and navigation compass)
+// ------------------------------------------------------------------
+void drawScreenWaypoint() {
+  char buf[48];
+
+  if (waypointEditing) {
+    // ---- Input mode: enter lat/lon ----
+    frameBuf.setTextSize(1);
+    frameBuf.setTextColor(TFT_GREEN);
+    frameBuf.setCursor(50, 6);
+    frameBuf.print("-- Enter Waypoint --");
+
+    frameBuf.setTextColor(TFT_DARKGREY);
+    frameBuf.setCursor(14, 22);
+    frameBuf.print("Nav: [;]  Digits: [0-9 . -]  [ok] Save");
+
+    frameBuf.setTextSize(2);
+    int yLat = 44, yLon = 72;
+
+    // Latitude field.
+    frameBuf.setTextColor(waypointField == 0 ? TFT_GREEN : TFT_WHITE);
+    frameBuf.setCursor(14, yLat);
+    frameBuf.printf("Lat: %s", waypointTmp[0].c_str());
+    if (waypointField == 0) frameBuf.print("_");
+
+    // Longitude field.
+    frameBuf.setTextColor(waypointField == 1 ? TFT_GREEN : TFT_WHITE);
+    frameBuf.setCursor(14, yLon);
+    frameBuf.printf("Lon: %s", waypointTmp[1].c_str());
+    if (waypointField == 1) frameBuf.print("_");
+
+    // Hint.
+    frameBuf.setTextSize(1);
+    frameBuf.setTextColor(TFT_DARKGREY);
+    frameBuf.setCursor(14, 102);
+    frameBuf.print("Example: 40.689247 / -74.044502");
+    frameBuf.setCursor(14, 116);
+    frameBuf.print("[w] cancel   [DEL] backspace");
+    return;
+  }
+
+  // ---- Navigation mode ----
+  if (!waypointSet) {
+    // No waypoint set — prompt user.
+    frameBuf.setTextSize(1);
+    frameBuf.setTextColor(TFT_GREEN);
+    frameBuf.setCursor(52, 6);
+    frameBuf.print("-- Waypoint Nav --");
+
+    frameBuf.setTextSize(2);
+    frameBuf.setTextColor(TFT_DARKGREY);
+    frameBuf.setCursor(26, 45);
+    frameBuf.print("No waypoint");
+
+    frameBuf.setTextSize(1);
+    frameBuf.setTextColor(TFT_WHITE);
+    frameBuf.setCursor(40, 80);
+    frameBuf.print("Press [w] to set target");
+
+    frameBuf.setTextColor(TFT_DARKGREY);
+    frameBuf.setCursor(32, 100);
+    frameBuf.print("Enter geocache lat/lon");
+    return;
+  }
+
+  // Waypoint is set — show compass arrow, bearing, distance.
+  bool locValid = gps.location.isValid();
+  bool courseValid = gps.course.isValid() && gps.speed.kmph() > 1.0;
+  float curLat = gps.location.lat();
+  float curLon = gps.location.lng();
+
+  // Compute bearing and distance.
+  float bearing = bearingTo(curLat, curLon, waypointLat, waypointLon);
+  float distKm = haversineKm(curLat, curLon, waypointLat, waypointLon);
+
+  // Relative bearing (bearing minus current heading).
+  float heading = gps.course.deg();
+  float relBearing = bearing;
+  if (courseValid) {
+    relBearing = fmod(bearing - heading + 360.0, 360.0);
+  }
+
+  // --- Layout: compass on the left, info on the right ---
+  int cx = 68, cy = 68, cr = 52; // Compass center and radius.
+
+  // Draw compass ring.
+  frameBuf.drawCircle(cx, cy, cr, TFT_DARKGREY);
+  frameBuf.drawCircle(cx, cy, cr + 1, TFT_DARKGREY);
+
+  // Cardinal markers on ring.
+  frameBuf.setTextSize(1);
+  frameBuf.setTextColor(TFT_DARKGREY);
+  frameBuf.setCursor(cx - 2, cy - cr - 9);
+  frameBuf.print("N");
+  frameBuf.setCursor(cx - 2, cy + cr + 2);
+  frameBuf.print("S");
+  frameBuf.setCursor(cx + cr + 3, cy - 3);
+  frameBuf.print("E");
+  frameBuf.setCursor(cx - cr - 8, cy - 3);
+  frameBuf.print("W");
+
+  if (locValid) {
+    // Draw arrow pointing to waypoint.
+    float arrowAng;
+    if (courseValid) {
+      arrowAng = relBearing; // Relative to travel direction (top = heading).
+    } else {
+      arrowAng = bearing; // Absolute bearing (top = North).
+    }
+    float angRad = radians(arrowAng);
+    float tipLen = cr - 6;
+    float tailLen = 14;
+    float wingLen = 12;
+    float wingSpread = 0.4; // radians.
+
+    // Arrow tip.
+    int tipX = cx + (int)(sin(angRad) * tipLen);
+    int tipY = cy - (int)(cos(angRad) * tipLen);
+    // Arrow tail.
+    int tailX = cx - (int)(sin(angRad) * tailLen);
+    int tailY = cy + (int)(cos(angRad) * tailLen);
+    // Arrow wings.
+    int lwX = cx - (int)(sin(angRad - wingSpread) * wingLen);
+    int lwY = cy + (int)(cos(angRad - wingSpread) * wingLen);
+    int rwX = cx - (int)(sin(angRad + wingSpread) * wingLen);
+    int rwY = cy + (int)(cos(angRad + wingSpread) * wingLen);
+
+    // Fill the arrow triangle.
+    frameBuf.fillTriangle(tipX, tipY, lwX, lwY, rwX, rwY, TFT_GREEN);
+    // Draw the tail line.
+    frameBuf.drawLine(cx, cy, tailX, tailY, TFT_DARKGREY);
+
+    // Heading reference indicator (small dot at top if course-relative).
+    if (courseValid) {
+      frameBuf.fillCircle(cx, cy - cr + 3, 2, TFT_GREEN);
+    }
+  } else {
+    // No GPS fix.
+    frameBuf.setTextSize(1);
+    frameBuf.setTextColor(TFT_RED);
+    frameBuf.setCursor(cx - 18, cy - 4);
+    frameBuf.print("No fix");
+  }
+
+  // ---- Right side info panel ----
+  int rx = 136; // Right panel X start.
+  frameBuf.setTextSize(1);
+
+  // Distance.
+  frameBuf.setTextColor(TFT_GREEN);
+  frameBuf.setCursor(rx, 6);
+  frameBuf.print("DISTANCE");
+  frameBuf.setTextSize(2);
+  frameBuf.setTextColor(TFT_WHITE);
+  frameBuf.setCursor(rx, 16);
+  if (locValid) {
+    if (distKm < 1.0)
+      snprintf(buf, sizeof(buf), "%.0fm", distKm * 1000.0);
+    else if (distKm < 100.0)
+      snprintf(buf, sizeof(buf), "%.2fkm", distKm);
+    else
+      snprintf(buf, sizeof(buf), "%.1fkm", distKm);
+  } else {
+    snprintf(buf, sizeof(buf), "---");
+  }
+  frameBuf.print(buf);
+
+  // Bearing.
+  frameBuf.setTextSize(1);
+  frameBuf.setTextColor(TFT_GREEN);
+  frameBuf.setCursor(rx, 40);
+  frameBuf.print("BEARING");
+  frameBuf.setTextSize(2);
+  frameBuf.setTextColor(TFT_WHITE);
+  frameBuf.setCursor(rx, 50);
+  if (locValid) {
+    snprintf(buf, sizeof(buf), "%.0f%s", bearing, cardinalFromHeading(bearing));
+  } else {
+    snprintf(buf, sizeof(buf), "---");
+  }
+  frameBuf.print(buf);
+
+  // Target coords.
+  frameBuf.setTextSize(1);
+  frameBuf.setTextColor(TFT_DARKGREY);
+  frameBuf.setCursor(rx, 74);
+  snprintf(buf, sizeof(buf), "%.5f", waypointLat);
+  frameBuf.print(buf);
+  frameBuf.setCursor(rx, 84);
+  snprintf(buf, sizeof(buf), "%.5f", waypointLon);
+  frameBuf.print(buf);
+
+  // Mode indicator.
+  frameBuf.setCursor(rx, 100);
+  frameBuf.setTextColor(TFT_DARKGREY);
+  if (courseValid)
+    frameBuf.print("Mode: Track up");
+  else
+    frameBuf.print("Mode: North up");
+
+  // Hint.
+  frameBuf.setCursor(rx, 116);
+  frameBuf.setTextColor(TFT_DARKGREY);
+  frameBuf.print("[w] edit [r] clear");
+}
+
 // ==================================================================
 //  Screen dispatch and update
 // ==================================================================
@@ -2149,11 +2393,12 @@ void updateScreen(bool force = false) {
   if (currentScreen == SCR_GPS_CLOCK) interval = 200;
   else if (currentScreen == SCR_NMEA_MONITOR) interval = 200;
   else if (currentScreen == SCR_3D_GLOBE) interval = 50;
+  else if (currentScreen == SCR_WAYPOINT && !waypointEditing) interval = 500;
 
   if (force || millis() - lastDisplay > interval)
   {
     lastDisplay = millis();
-    if (openMenu) return;
+    if (openMenu || configsMenu) return;
     // Clear screen for clean redraw.
     frameBuf.fillScreen(TFT_BLACK);
     // Dispatch to current screen.
@@ -2176,6 +2421,7 @@ void updateScreen(bool force = false) {
       case SCR_GPS_CLOCK:    drawScreenGpsClock();    break;
       case SCR_GPS_MAP:      drawScreenGpsMap();      break;
       case SCR_3D_GLOBE:    drawScreen3DGlobe();    break;
+      case SCR_WAYPOINT:    drawScreenWaypoint();   break;
       default: break;
     }
     frameBuf.pushSprite(0, 0);
@@ -2347,7 +2593,8 @@ void drawHelp(bool should_I) {
       "[p] Show/hide ID on skyplot.",
       "[o] Show/hide System on skyplot.",
       "[l] USB serial satellites list.",
-      "[n] USB serial NMEA sentences."
+      "[n] USB serial NMEA sentences.",
+      "[w] Waypoint entry (on WP screen)."
     };
     int count = sizeof(helpText) / sizeof(helpText[0]);
     frameBuf.fillRect(4, 4, screenW-8, screenH-8, TFT_BLACK);
@@ -2386,6 +2633,46 @@ void drawHelp(bool should_I) {
 /*    Handle keyboard data inputs.
 */
 void handleKeys() {
+  // Waypoint coordinate entry.
+  if (waypointEditing) {
+    if (M5Cardputer.Keyboard.isChange()) {
+      if (M5Cardputer.Keyboard.isPressed()) {
+        Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+        for (auto c : status.word) {
+          // Field switch (;/TAB key).
+          if (c == ';')
+            waypointField = (waypointField + 1) % 2;
+          // Digits 0-9.
+          if (c >= '0' && c <= '9')
+            waypointTmp[waypointField] += c;
+          // Decimal point.
+          if (c == '.' && waypointTmp[waypointField].indexOf('.') == -1)
+            waypointTmp[waypointField] += '.';
+          // Minus sign for negative coords.
+          if (c == '-' && waypointTmp[waypointField].length() == 0)
+            waypointTmp[waypointField] += '-';
+        }
+        // Delete.
+        if (status.del && waypointTmp[waypointField].length() > 0)
+          waypointTmp[waypointField].remove(waypointTmp[waypointField].length() - 1);
+        // Enter: save waypoint.
+        if (status.enter) {
+          if (waypointTmp[0].length() > 0 && waypointTmp[1].length() > 0) {
+            waypointLat = waypointTmp[0].toFloat();
+            waypointLon = waypointTmp[1].toFloat();
+            waypointSet = true;
+          }
+          waypointTmp[0] = waypointTmp[1] = "";
+          waypointField = 0;
+          waypointEditing = false;
+          updateScreen(true);
+          return;
+        }
+        updateScreen(true);
+      }
+    }
+    return; // Block other key handling while editing.
+  }
   if (configsMenu) {
     if (M5Cardputer.Keyboard.isChange()) {
       if (M5Cardputer.Keyboard.isPressed()) {
@@ -2480,8 +2767,31 @@ void handleControls() {
     frameBuf.pushSprite(0, 0);
     delay(300); // Debounce.
   }
+  // Handle W key for waypoint entry (only on waypoint screen).
+  if (currentScreen == SCR_WAYPOINT && M5Cardputer.Keyboard.isKeyPressed('w')) {
+    if (waypointEditing) {
+      // Cancel editing.
+      waypointEditing = false;
+      waypointTmp[0] = waypointTmp[1] = "";
+      waypointField = 0;
+    } else {
+      // Enter editing mode.
+      waypointEditing = true;
+      waypointField = 0;
+      waypointTmp[0] = waypointTmp[1] = "";
+    }
+    updateScreen(true);
+    delay(300);
+  }
+  // Handle R key to clear waypoint (only on waypoint screen, not editing).
+  if (currentScreen == SCR_WAYPOINT && !waypointEditing && M5Cardputer.Keyboard.isKeyPressed('r')) {
+    waypointSet = false;
+    waypointLat = waypointLon = 0;
+    updateScreen(true);
+    delay(300);
+  }
   // ---- Screen navigation (only when no menu is open) ----
-  if (!openMenu && !configsMenu) {
+  if (!openMenu && !configsMenu && !waypointEditing) {
     // Previous screen (left arrow = ',').
     if (M5Cardputer.Keyboard.isKeyPressed(',')) {
       currentScreen = (ScreenID)((currentScreen - 1 + SCR_COUNT) % SCR_COUNT);
